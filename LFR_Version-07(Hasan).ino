@@ -1,5 +1,3 @@
-// Version -02
-
 #include "U8glib.h"
 #include <EEPROM.h>
 
@@ -26,6 +24,9 @@ U8GLIB_SSD1306_128X64 u8g(U8G_I2C_OPT_DEV_0 | U8G_I2C_OPT_NO_ACK | U8G_I2C_OPT_F
 #define S1 10
 #define S2 11
 #define S3 12
+// NOTE: A6/A7 only exist on Arduino Nano, NOT on an Uno. If you are using
+// an Uno, this pin does not physically exist and readings will be garbage.
+// Change to an unused analog pin (e.g. A0) if you're on an Uno.
 #define SIG_PIN A7
 
 // Sensor Variables
@@ -37,9 +38,15 @@ const uint8_t WeightValue[sensorNumber] = { 10, 20, 30, 40, 50, 60, 70, 80, 90, 
 uint8_t sumOnSensor;
 uint16_t sensorWight;
 uint16_t bitSensor;
-uint16_t Max_ADC[sensorNumber];
-uint16_t Min_ADC[sensorNumber];
 uint16_t Reference_ADC[sensorNumber];
+
+// FIX: whether "on the line" corresponds to a HIGHER or LOWER ADC value
+// than the reference/threshold. This is hardware/wiring dependent and was
+// previously hardcoded as ">" (assumed black > white), which silently
+// inverted every reading on boards wired the other way -> line "not
+// detected properly" and turns that never trigger correctly. Now this is
+// measured during calibration and persisted to EEPROM.
+bool blackIsHigher = true;
 
 // PID Variables
 float line_position;
@@ -181,7 +188,7 @@ void loop() {
   u8g.firstPage();
   do {
     u8g.setFont(u8g_font_profont12);
-    u8g.drawStr(10, 15, "RoboTech Innovator");
+    u8g.drawStr(10, 15, "Black Line Pannel");
     u8g.setFont(u8g_font_7x14B);
     u8g.setPrintPos(5, 60); u8g.print(s[0]);
     u8g.setPrintPos(15, 60); u8g.print(s[1]);
@@ -230,10 +237,11 @@ void showSplashScreen() {
   u8g.firstPage();
   do {
     u8g.setFont(u8g_font_7x14B);
-    u8g.drawStr(20, 30, "RoboTech");
-    u8g.drawStr(10, 50, "Innovator");
+    u8g.drawStr(20, 30, "Black");
+    u8g.drawStr(20, 30, "Line");
+    u8g.drawStr(30, 50, "Pannel");
     u8g.setFont(u8g_font_profont12);
-    u8g.drawStr(30, 62, "Loading...");
+    u8g.drawStr(40, 62, "Loading...");
   } while (u8g.nextPage());
   delay(1000);
 }
@@ -530,10 +538,16 @@ void calibrateSensor() {
   while (digitalRead(BUTTON_SELECT_PIN) == HIGH);
   delay(100);
 
-  // Calibrate black reference and compute midpoint threshold
-  // FIX: previously this only nudged the white average toward black,
-  // which made the threshold sit too close to white and caused
-  // dark/black areas to be misread. True midpoint = (white + black) / 2.
+  // Calibrate black reference and compute midpoint threshold.
+  // True midpoint = (white + black) / 2.
+  //
+  // FIX: also record whether black reads HIGHER or LOWER than white.
+  // This was previously assumed (hardcoded as ">") in read_black_line(),
+  // which silently inverted every sensor reading on boards wired the
+  // opposite way -> line never detected correctly, turns never trigger
+  // correctly. Now it's measured here and used consistently everywhere.
+  uint32_t whiteSum = 0;
+  uint32_t blackSum = 0;
   for (int i = 0; i < sensorNumber; i++) {
     selectChannel(i);
     uint32_t sum = 0;
@@ -543,7 +557,10 @@ void calibrateSensor() {
     }
     uint16_t blackValue = sum / 20;
     Reference_ADC[i] = (whiteRef[i] + blackValue) / 2;
+    whiteSum += whiteRef[i];
+    blackSum += blackValue;
   }
+  blackIsHigher = (blackSum > whiteSum);
 
   // Save calibration
   saveCalibration();
@@ -580,7 +597,7 @@ void startFollow() {
     u8g.drawStr(30, 35, "Line Follow");
     u8g.drawStr(40, 50, "Activated");
   } while (u8g.nextPage());
-  delay(500);
+  delay(250);
 
   previous_error = 0;
   last_pid_time = micros();
@@ -641,10 +658,10 @@ void startFollow() {
     }
 
     // ---- Case 2: ALL sensors on black (sharp turn / intersection / thick line) ----
-    // FIX: previously unhandled. sensorWight/sumOnSensor averaged out to
-    // ~center position here, so error ~0 and the robot drove straight
-    // through, losing the actual turn. Now we keep turning using the
-    // smoothed last known direction until sensors partially clear again.
+    // sensorWight/sumOnSensor averaged out to ~center position here, so
+    // error ~0 and the robot drove straight through, losing the actual
+    // turn. Now we keep turning using the smoothed last known direction
+    // until sensors partially clear again.
     if (sumOnSensor == sensorNumber) {
       int8_t dir = lastTurnDirection;
       motor(dir * turnSpeed, -dir * turnSpeed);
@@ -674,7 +691,7 @@ void startFollow() {
     // ---- Normal / turn PID line following ----
     // error and line_position were already computed above for this reading.
 
-    // FIX: normalize derivative term by actual elapsed time (dt) so PID
+    // Normalize derivative term by actual elapsed time (dt) so PID
     // behavior doesn't change with loop-rate jitter
     uint32_t now = micros();
     float dt = (now - last_pid_time) / 1000000.0f;
@@ -684,11 +701,11 @@ void startFollow() {
     float derivative = (error - previous_error) / dt;
 
     // ---- Gain scheduling: react harder AND slow down on real turns ----
-    // This is the core turn fix: at base_speed alone, normal (gentle)
-    // gains don't correct fast enough for a sharp turn, so the robot runs
-    // straight through it. When |error| crosses SHARP_TURN_ERROR we boost
-    // kp for a snappier correction and temporarily reduce the base speed
-    // so there's more time/control to actually complete the turn.
+    // At base_speed alone, normal (gentle) gains don't correct fast enough
+    // for a sharp turn, so the robot runs straight through it. When |error|
+    // crosses SHARP_TURN_ERROR we boost kp for a snappier correction and
+    // temporarily reduce the base speed so there's more time/control to
+    // actually complete the turn.
     float effective_kp = kp;
     uint8_t effective_base = base_speed;
     bool inTurn = (fabs(error) > SHARP_TURN_ERROR);
@@ -697,8 +714,8 @@ void startFollow() {
       effective_base = (uint8_t)(base_speed * TURN_SPEED_SCALE);
     }
 
-    // FIX: compute in float/int32 first, THEN constrain, to avoid
-    // int16_t overflow/wraparound with large kd values causing sudden
+    // Compute in float/int32 first, THEN constrain, to avoid int16_t
+    // overflow/wraparound with large kd values causing sudden
     // wrong-direction spikes
     float correctionF = (error * effective_kp) + (derivative * kd * 0.001f);
     int32_t correction = (int32_t)correctionF;
@@ -730,18 +747,17 @@ void read_black_line() {
     delayMicroseconds(30);  // reduced settle time for faster loop rate
     sensorADC[i] = analogRead(SIG_PIN);
 
-    if (sensorADC[i] > Reference_ADC[i]) {
-      if (inverseON == 0) {
-        s[i] = 1;
-      } else {
-        s[i] = 0;
-      }
+    // FIX: use the auto-detected polarity (blackIsHigher, measured during
+    // calibration) instead of hardcoding ">". This makes detection correct
+    // regardless of which way your specific sensor board/wiring reports
+    // black vs white.
+    bool onLine = blackIsHigher ? (sensorADC[i] > Reference_ADC[i])
+                                 : (sensorADC[i] < Reference_ADC[i]);
+
+    if (inverseON == 0) {
+      s[i] = onLine ? 1 : 0;
     } else {
-      if (inverseON == 0) {
-        s[i] = 0;
-      } else {
-        s[i] = 1;
-      }
+      s[i] = onLine ? 0 : 1;
     }
 
     sumOnSensor += s[i];
@@ -915,15 +931,16 @@ void motor_test() {
 }
 
 //==================================== EEPROM FUNCTIONS ====================================
-// FIX: calibration uses addresses 0..(2*sensorNumber - 1) = 0..27.
-// Settings (base_speed, kp, kd) use addresses 50-52, so there's no
-// overlap - kept as-is but documented clearly here to avoid future bugs.
+// Calibration uses addresses 0..(2*sensorNumber - 1) = 0..27 for the
+// Reference_ADC table, plus address 28 for the blackIsHigher polarity flag.
+// Settings (base_speed, kp, kd) use addresses 50-52, so there's no overlap.
 void saveCalibration() {
   int address = 0;
   for (int i = 0; i < sensorNumber; i++) {
     EEPROM.write(address++, Reference_ADC[i] & 0xFF);
     EEPROM.write(address++, (Reference_ADC[i] >> 8) & 0xFF);
   }
+  EEPROM.write(address++, blackIsHigher ? 1 : 0);  // address 28
 }
 
 void loadCalibration() {
@@ -934,6 +951,12 @@ void loadCalibration() {
       // Set default calibration if not programmed
       Reference_ADC[i] = 512;
     }
+  }
+  uint8_t polarityByte = EEPROM.read(address++);  // address 28
+  if (polarityByte == 0xFF) {
+    blackIsHigher = true;  // unprogrammed EEPROM, sensible default
+  } else {
+    blackIsHigher = (polarityByte == 1);
   }
 }
 
@@ -973,6 +996,7 @@ void resetSettings() {
   kp = 8;
   kd = 200;
   inverseON = 0;
+  blackIsHigher = true;
 
   // Set default calibration
   for (int i = 0; i < sensorNumber; i++) {
