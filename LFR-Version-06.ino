@@ -188,7 +188,7 @@ void loop() {
   u8g.firstPage();
   do {
     u8g.setFont(u8g_font_profont12);
-    u8g.drawStr(10, 15, "RoboTech Innovator");
+    u8g.drawStr(10, 15, "Black Line Pannel");
     u8g.setFont(u8g_font_7x14B);
     u8g.setPrintPos(5, 60); u8g.print(s[0]);
     u8g.setPrintPos(15, 60); u8g.print(s[1]);
@@ -237,10 +237,11 @@ void showSplashScreen() {
   u8g.firstPage();
   do {
     u8g.setFont(u8g_font_7x14B);
-    u8g.drawStr(20, 30, "RoboTech");
-    u8g.drawStr(10, 50, "Innovator");
+    u8g.drawStr(20, 30, "Black");
+    u8g.drawStr(20, 30, "Line");
+    u8g.drawStr(30, 50, "Pannel");
     u8g.setFont(u8g_font_profont12);
-    u8g.drawStr(30, 62, "Loading...");
+    u8g.drawStr(40, 62, "Loading...");
   } while (u8g.nextPage());
   delay(1000);
 }
@@ -596,7 +597,7 @@ void startFollow() {
     u8g.drawStr(30, 35, "Line Follow");
     u8g.drawStr(40, 50, "Activated");
   } while (u8g.nextPage());
-  delay(500);
+  delay(250);
 
   previous_error = 0;
   last_pid_time = micros();
